@@ -1,4 +1,21 @@
-# /sitemap_crawler_pro_v11.py
+# /sitemap_audit_crawler.py
+
+"""
+Sitemap Audit Crawler
+=====================
+
+Desktop SEO auditing tool built with PyQt5. It detects sitemap files,
+collects URL entries recursively, crawls pages concurrently, extracts
+selected SEO fields, saves/restores progress, and exports the result to Excel.
+
+The code is intentionally organized into small classes:
+- SitemapDetector: sitemap discovery and XML parsing.
+- DetectorThread: background worker for sitemap discovery.
+- CrawlerThread: concurrent URL crawler.
+- CustomTableWidget: URL table with advanced checkbox selection.
+- SitemapCrawler: main application window and UI orchestration.
+"""
+
 import sys
 import os
 import json
@@ -41,26 +58,32 @@ from PyQt5.QtCore import QThread, pyqtSignal, Qt, QMutex, QTimer
 from PyQt5.QtGui import QFont, QColor
 
 
-APP_NAME = "Sitemap Crawler Pro"
-APP_VERSION = "v11"
+
+# Application metadata used in the window title and progress files.
+APP_NAME = "Sitemap Audit Crawler"
+APP_VERSION = "v12"
 PROGRESS_SCHEMA_VERSION = 1
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0 Safari/537.36 SitemapCrawlerPro/11"
+    "Chrome/120.0 Safari/537.36 SitemapAuditCrawler/12"
 )
 
 
-USER_AGENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sitemap_crawler_user_agents.json")
 
+# Local file where custom User-Agent profiles are persisted.
+USER_AGENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sitemap_audit_user_agents.json")
+
+
+# Built-in User-Agent profiles that can be selected without editing the code.
 PRESET_USER_AGENTS = [
     {
-        "name": "Chrome en Windows",
+        "name": "Chrome on Windows",
         "value": DEFAULT_USER_AGENT,
         "preset": True,
     },
     {
-        "name": "Chrome en macOS",
+        "name": "Chrome on macOS",
         "value": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -69,7 +92,7 @@ PRESET_USER_AGENTS = [
         "preset": True,
     },
     {
-        "name": "Firefox en Windows",
+        "name": "Firefox on Windows",
         "value": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) "
             "Gecko/20100101 Firefox/121.0"
@@ -77,7 +100,7 @@ PRESET_USER_AGENTS = [
         "preset": True,
     },
     {
-        "name": "Safari en macOS",
+        "name": "Safari on macOS",
         "value": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/605.1.15 (KHTML, like Gecko) "
@@ -103,17 +126,25 @@ PRESET_USER_AGENTS = [
 ]
 
 
+
+# Normalize User-Agent values before using them in HTTP headers.
 def clean_user_agent(value):
+    """Return a safe, single-line User-Agent value, falling back to the default."""
     text = (value or "").replace("\r", " ").replace("\n", " ").strip()
     while "  " in text:
         text = text.replace("  ", " ")
     return text or DEFAULT_USER_AGENT
 
 
+
+# -----------------------------------------------------------------------------
+# Sitemap discovery and parsing
+# -----------------------------------------------------------------------------
 class SitemapDetector:
-    """Detecta y parsea sitemaps de forma recursiva."""
+    """Detect and parse sitemap files recursively."""
 
     def __init__(self, base_url, timeout=10, stop_checker=None, user_agent=None):
+        """Store sitemap discovery settings and prepare a reusable HTTP session."""
         self.base_url = self.normalize_url(base_url)
         self.timeout = timeout
         self.all_urls = {}
@@ -128,10 +159,11 @@ class SitemapDetector:
         self.session.headers.update({"User-Agent": self.user_agent})
 
     def should_stop(self):
+        """Return True when the current operation has been requested to stop."""
         return bool(self.stop_checker and self.stop_checker())
 
     def normalize_url(self, url):
-        """Normaliza la URL para soportar dominio o sitemap directo."""
+        """Normalize a domain or direct sitemap URL into an absolute URL."""
         url = (url or "").strip()
         if not url:
             return ""
@@ -142,11 +174,12 @@ class SitemapDetector:
         return url
 
     def get_base_domain(self):
+        """Return the scheme and host portion of the configured base URL."""
         parsed = urlparse(self.base_url)
         return f"{parsed.scheme}://{parsed.netloc}"
 
     def find_sitemaps_from_robots(self, progress_callback=None):
-        """Busca sitemaps en robots.txt."""
+        """Discover sitemap URLs declared inside robots.txt."""
         domain = self.get_base_domain()
         potential_sitemaps = []
         robots_url = urljoin(domain, "/robots.txt")
@@ -172,15 +205,15 @@ class SitemapDetector:
                                     progress_callback(f"✓ robots.txt: {sitemap_url}")
                             else:
                                 if progress_callback:
-                                    progress_callback(f"❌ No accesible: {sitemap_url}")
+                                    progress_callback(f"❌ Not accessible: {sitemap_url}")
         except Exception as exc:
             if progress_callback:
-                progress_callback(f"⚠ Error leyendo robots.txt: {str(exc)[:80]}")
+                progress_callback(f"⚠ Error reading robots.txt: {str(exc)[:80]}")
 
         return potential_sitemaps
 
     def find_sitemaps_typical_paths(self, progress_callback=None):
-        """Busca sitemaps en rutas típicas como fallback."""
+        """Probe common sitemap locations when robots.txt does not provide them."""
         domain = self.get_base_domain()
         potential_sitemaps = []
         typical_paths = [
@@ -206,34 +239,34 @@ class SitemapDetector:
                 if url not in potential_sitemaps:
                     potential_sitemaps.append(url)
                 if progress_callback:
-                    progress_callback(f"✓ Encontrado: {path}")
+                    progress_callback(f"✓ Found: {path}")
 
         return potential_sitemaps
 
     def find_sitemaps(self, progress_callback=None):
-        """Busca sitemaps: si el input ya es XML, intenta usarlo directo."""
+        """Find sitemap sources, using direct XML input when provided."""
         if self.base_url.lower().endswith(".xml") and self.check_url_exists(self.base_url):
             self.detected_sitemaps = [self.base_url]
             if progress_callback:
-                progress_callback(f"✓ Sitemap directo: {self.base_url}")
+                progress_callback(f"✓ Direct sitemap: {self.base_url}")
             return self.detected_sitemaps
 
         sitemaps_from_robots = self.find_sitemaps_from_robots(progress_callback)
         if sitemaps_from_robots:
             self.detected_sitemaps = sitemaps_from_robots
             if progress_callback:
-                progress_callback(f"ℹ️ Usando {len(sitemaps_from_robots)} sitemap(s) desde robots.txt")
+                progress_callback(f"ℹ️ Using {len(sitemaps_from_robots)} sitemap(s) from robots.txt")
             return sitemaps_from_robots
 
         if progress_callback:
-            progress_callback("ℹ️ No encontrado en robots.txt, buscando en rutas típicas...")
+            progress_callback("ℹ️ Not found in robots.txt; checking common sitemap paths...")
 
         sitemaps_from_paths = self.find_sitemaps_typical_paths(progress_callback)
         self.detected_sitemaps = sitemaps_from_paths
         return sitemaps_from_paths
 
     def check_url_exists(self, url):
-        """Verifica si una URL existe. Primero HEAD, luego GET si falla."""
+        """Check whether a URL is reachable, trying HEAD first and GET as fallback."""
         try:
             if self.should_stop():
                 return False
@@ -252,7 +285,7 @@ class SitemapDetector:
             return False
 
     def parse_sitemaps_recursive(self, progress_callback=None):
-        """Parsea los sitemaps detectados de forma recursiva."""
+        """Parse every detected sitemap and all nested sitemap indexes."""
         pending = list(self.detected_sitemaps)
         for sitemap in pending:
             if self.should_stop():
@@ -262,7 +295,7 @@ class SitemapDetector:
         return self.all_urls
 
     def parse_sitemap(self, sitemap_url, progress_callback=None, parent_sitemap=None):
-        """Parsea un sitemap XML o sitemap index."""
+        """Parse a single sitemap XML file or sitemap index file."""
         if self.should_stop():
             return
 
@@ -273,7 +306,7 @@ class SitemapDetector:
 
         if self.recursion_count >= self.max_recursion:
             if progress_callback:
-                progress_callback("⚠ Límite de recursión alcanzado")
+                progress_callback("⚠ Recursion limit reached")
             return
 
         self.recursion_count += 1
@@ -292,16 +325,16 @@ class SitemapDetector:
                     root = etree.fromstring(response.content, parser)
                 except Exception:
                     if progress_callback:
-                        progress_callback(f"❌ XML inválido: {sitemap_url}")
+                        progress_callback(f"❌ Invalid XML: {sitemap_url}")
                     return
 
             nested_sitemaps = self.extract_nested_sitemaps(root)
             urls_found = self.extract_urls_from_sitemap(root, parent_sitemap)
 
             if urls_found > 0 and progress_callback:
-                progress_callback(f"✓ {urls_found} URLs en: {sitemap_url.split('/')[-1]}")
+                progress_callback(f"✓ {urls_found} URLs in: {sitemap_url.split('/')[-1]}")
             elif nested_sitemaps and progress_callback:
-                progress_callback(f"📄 Sitemap Index con {len(nested_sitemaps)} sitemaps")
+                progress_callback(f"📄 Sitemap index with {len(nested_sitemaps)} sitemaps")
 
             for nested_sitemap in nested_sitemaps:
                 if self.should_stop():
@@ -312,7 +345,7 @@ class SitemapDetector:
                     self.sitemap_urls_map.setdefault(nested_sitemap, [])
 
                 if progress_callback:
-                    progress_callback(f"📄 Procesando: {nested_sitemap.split('/')[-1]}")
+                    progress_callback(f"📄 Processing: {nested_sitemap.split('/')[-1]}")
 
                 self.parse_sitemap(nested_sitemap, progress_callback, parent_sitemap=nested_sitemap)
 
@@ -321,12 +354,13 @@ class SitemapDetector:
                 progress_callback(f"⏱ TIMEOUT: {sitemap_url}")
         except requests.ConnectionError:
             if progress_callback:
-                progress_callback(f"❌ ERROR DE CONEXIÓN: {sitemap_url}")
+                progress_callback(f"❌ CONNECTION ERROR: {sitemap_url}")
         except Exception as exc:
             if progress_callback:
                 progress_callback(f"❌ ERROR: {str(exc)[:100]}")
 
     def extract_nested_sitemaps(self, root):
+        """Return nested sitemap URLs found inside a sitemap index."""
         nested = []
         for elem in root.iter():
             tag = self.strip_namespace(elem.tag)
@@ -338,6 +372,7 @@ class SitemapDetector:
         return nested
 
     def extract_urls_from_sitemap(self, root, parent_sitemap):
+        """Extract page URLs from a sitemap and attach them to their source sitemap."""
         urls_found = 0
         self.sitemap_urls_map.setdefault(parent_sitemap, [])
 
@@ -362,25 +397,32 @@ class SitemapDetector:
 
     @staticmethod
     def strip_namespace(tag):
+        """Remove the XML namespace prefix from a tag name."""
         if "}" in tag:
             return tag.split("}", 1)[1]
         return tag
 
     def find_child_text(self, elem, child_name):
+        """Find the text content of a named XML child element."""
         for child in elem:
             if self.strip_namespace(child.tag) == child_name and child.text:
                 return child.text.strip()
         return None
 
 
+
+# -----------------------------------------------------------------------------
+# Background thread for sitemap detection
+# -----------------------------------------------------------------------------
 class DetectorThread(QThread):
-    """Thread para detectar sitemaps sin bloquear la UI."""
+    """Background thread that detects sitemaps without blocking the UI."""
 
     progress = pyqtSignal(str)
     finished = pyqtSignal(list, dict, dict)
     error = pyqtSignal(str)
 
     def __init__(self, url, timeout, user_agent=None):
+        """Store the detection request parameters for the background thread."""
         super().__init__()
         self.url = url
         self.timeout = timeout
@@ -389,15 +431,18 @@ class DetectorThread(QThread):
         self.mutex = QMutex()
 
     def is_running_flag(self):
+        """Read the thread running flag in a mutex-protected way."""
         self.mutex.lock()
         value = self._running
         self.mutex.unlock()
         return value
 
     def should_stop(self):
+        """Return True when the current operation has been requested to stop."""
         return not self.is_running_flag()
 
     def run(self):
+        """Run the background task managed by this thread."""
         try:
             detector = SitemapDetector(self.url, self.timeout, stop_checker=self.should_stop, user_agent=self.user_agent)
             detected = detector.find_sitemaps(self.progress.emit)
@@ -406,7 +451,7 @@ class DetectorThread(QThread):
                 return
 
             if not detected:
-                self.error.emit("No se encontraron sitemaps")
+                self.error.emit("No sitemaps were found")
                 return
 
             urls_dict = detector.parse_sitemaps_recursive(self.progress.emit)
@@ -421,17 +466,25 @@ class DetectorThread(QThread):
                 self.error.emit(f"Error: {str(exc)}")
 
     def stop(self):
+        """Request the running worker to stop as soon as possible."""
         self.mutex.lock()
         self._running = False
         self.mutex.unlock()
 
 
+
+# -----------------------------------------------------------------------------
+# Concurrent crawler worker
+# -----------------------------------------------------------------------------
 class CrawlerThread(QThread):
+    """Background crawler that fetches many URLs using a configurable worker pool."""
+
     progress = pyqtSignal(int, int, str, str, dict)
     finished = pyqtSignal()
     error = pyqtSignal(str)
 
     def __init__(self, urls, timeout, delay, columns_to_extract, worker_count=8, user_agent=None):
+        """Store crawl settings, selected extractors, and concurrency limits."""
         super().__init__()
         self.urls = list(urls)
         self.timeout = timeout
@@ -444,13 +497,14 @@ class CrawlerThread(QThread):
         self.thread_local = threading.local()
 
     def is_running_flag(self):
+        """Read the thread running flag in a mutex-protected way."""
         self.mutex.lock()
         value = self.running
         self.mutex.unlock()
         return value
 
     def get_session(self):
-        """Crea una sesión HTTP por hilo para reutilizar conexiones sin compartir estado entre hilos."""
+        """Create one HTTP session per worker thread to reuse connections safely."""
         session = getattr(self.thread_local, "session", None)
         if session is None:
             session = requests.Session()
@@ -459,7 +513,7 @@ class CrawlerThread(QThread):
         return session
 
     def flatten_json(self, value, prefix="Schema", max_depth=3, current_depth=0):
-        """Aplana JSON-LD para exportar campos útiles sin explotar la tabla."""
+        """Flatten JSON-LD into exportable fields while limiting table growth."""
         fields = {}
         if current_depth > max_depth:
             return fields
@@ -487,6 +541,7 @@ class CrawlerThread(QThread):
         return fields
 
     def extract_json_schema_fields(self, json_ld):
+        """Parse a JSON-LD block and return flattened schema fields."""
         try:
             if not json_ld:
                 return {}
@@ -497,6 +552,7 @@ class CrawlerThread(QThread):
 
     @staticmethod
     def safe_text(value, limit=500):
+        """Convert any value into compact single-line text with a maximum length."""
         if value is None:
             return ""
         text = str(value).replace("\r", " ").replace("\n", " ").strip()
@@ -505,7 +561,7 @@ class CrawlerThread(QThread):
         return text[:limit]
 
     def extract_data_from_html(self, html, url):
-        """Extrae datos SEO del HTML según columnas seleccionadas."""
+        """Extract selected SEO fields from an HTML document."""
         data = {}
         try:
             soup = BeautifulSoup(html, "html.parser")
@@ -545,9 +601,9 @@ class CrawlerThread(QThread):
         return data
 
     def fetch_url(self, url):
-        """Ejecuta una consulta HTTP. Esta función corre en los workers del pool."""
+        """Fetch one URL inside the worker pool and return status plus extracted data."""
         if not self.is_running_flag():
-            return "DETENIDO", {}
+            return "STOPPED", {}
 
         status_code = "ERROR"
         data = {}
@@ -562,7 +618,7 @@ class CrawlerThread(QThread):
             if response.status_code == 200 and "text/html" in content_type:
                 data.update(self.extract_data_from_html(response.text, url))
             elif response.status_code == 200:
-                data["Note"] = "Respuesta 200, pero no parece HTML"
+                data["Note"] = "HTTP 200 response, but content does not look like HTML"
 
         except requests.Timeout:
             status_code = "TIMEOUT"
@@ -583,6 +639,7 @@ class CrawlerThread(QThread):
         return status_code, data
 
     def run(self):
+        """Run the background task managed by this thread."""
         executor = None
         try:
             total = len(self.urls)
@@ -621,7 +678,7 @@ class CrawlerThread(QThread):
             self.finished.emit()
         except Exception as exc:
             if self.is_running_flag():
-                self.error.emit(f"Error general: {str(exc)}")
+                self.error.emit(f"General error: {str(exc)}")
         finally:
             if executor is not None:
                 try:
@@ -630,22 +687,29 @@ class CrawlerThread(QThread):
                     executor.shutdown(wait=False)
 
     def stop(self):
+        """Request the running worker to stop as soon as possible."""
         self.mutex.lock()
         self.running = False
         self.mutex.unlock()
 
 
+
+# -----------------------------------------------------------------------------
+# Table selection helper
+# -----------------------------------------------------------------------------
 class CustomTableWidget(QTableWidget):
-    """Tabla con selección por checkbox, Shift/Ctrl y atajos."""
+    """Table widget with checkbox selection, Shift/Ctrl behavior, and keyboard shortcuts."""
 
     selection_changed = pyqtSignal()
 
     def __init__(self):
+        """Initialize table selection helper state."""
         super().__init__()
         self.last_checked_row = -1
         self.blocking = False
 
     def mousePressEvent(self, event):
+        """Handle checkbox selection with normal, Ctrl, and Shift clicks."""
         item = self.itemAt(event.pos())
         if item:
             row = self.row(item)
@@ -673,6 +737,7 @@ class CustomTableWidget(QTableWidget):
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
+        """Handle keyboard shortcuts for bulk table selection."""
         if event.key() == Qt.Key_A and event.modifiers() == Qt.ControlModifier:
             self.blocking = True
             for row in range(self.rowCount()):
@@ -698,22 +763,34 @@ class CustomTableWidget(QTableWidget):
             super().keyPressEvent(event)
 
 
+
+# -----------------------------------------------------------------------------
+# Main desktop application
+# -----------------------------------------------------------------------------
 class SitemapCrawler(QMainWindow):
+    """Main window that coordinates UI state, background threads, and exports."""
+
     def __init__(self):
+        """Initialize the application state, UI widgets, and auto-save timer."""
         super().__init__()
+
+        # URL and sitemap state. The dictionary maps each URL to its source sitemap.
         self.urls = {}
         self.crawler_thread = None
         self.detector_thread = None
         self.detected_sitemaps = []
         self.sitemap_urls_map = {}
+        # Table state is keyed by URL so sorting/filtering does not break updates.
         self.table_data = {}
         self.url_to_row = {}
         self.selected_count = 0
         self.updating_button = False
+        # Progress state allows sessions to be saved and resumed later.
         self.progress_file_path = None
         self.progress_dirty = False
         self.auto_save_every = 10
         self.processed_since_autosave = 0
+        # User-Agent profiles include built-in presets plus local custom entries.
         self.custom_user_agents = []
         self.user_agent_options = []
 
@@ -726,11 +803,12 @@ class SitemapCrawler(QMainWindow):
         self.autosave_timer.start(15000)
 
     def closeEvent(self, event):
+        """Ask to save unsaved progress before closing the application."""
         if self.progress_dirty:
             reply = QMessageBox.question(
                 self,
-                "Guardar avance",
-                "Hay cambios sin guardar. ¿Quieres guardar el avance antes de cerrar?",
+                "Save Progress",
+                "There are unsaved changes. Do you want to save progress before closing?",
                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
                 QMessageBox.Yes,
             )
@@ -746,6 +824,7 @@ class SitemapCrawler(QMainWindow):
         event.accept()
 
     def stop_all_threads(self):
+        """Stop active background threads before starting a new task or closing."""
         try:
             if self.detector_thread and self.detector_thread.isRunning():
                 self.detector_thread.stop()
@@ -758,29 +837,31 @@ class SitemapCrawler(QMainWindow):
             pass
 
     def init_ui(self):
+        """Build the complete PyQt5 user interface."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout()
 
         left_panel = QVBoxLayout()
 
-        url_label = QLabel("Dominio o sitemap:")
+        # Left panel: input, execution settings, progress controls, and actions.
+        url_label = QLabel("Domain or Sitemap:")
         url_label.setFont(QFont("Arial", 10, QFont.Bold))
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("midominio.com o https://midominio.com/sitemap.xml")
+        self.url_input.setPlaceholderText("example.com or https://example.com/sitemap.xml")
         left_panel.addWidget(url_label)
         left_panel.addWidget(self.url_input)
 
-        info_label = QLabel("Ingresa el dominio o URL directa del sitemap")
+        info_label = QLabel("Enter a domain or a direct sitemap URL")
         info_label.setFont(QFont("Arial", 8))
         info_label.setStyleSheet("color: gray;")
         left_panel.addWidget(info_label)
 
-        self.load_btn = QPushButton("Detectar sitemaps")
+        self.load_btn = QPushButton("Detect Sitemaps")
         self.load_btn.clicked.connect(self.auto_detect_sitemaps)
         left_panel.addWidget(self.load_btn)
 
-        log_label = QLabel("Sitemaps detectados:")
+        log_label = QLabel("Detected Sitemaps:")
         log_label.setFont(QFont("Arial", 9, QFont.Bold))
         left_panel.addWidget(log_label)
 
@@ -788,18 +869,18 @@ class SitemapCrawler(QMainWindow):
         self.sitemaps_list.itemSelectionChanged.connect(self.on_sitemap_selected)
         left_panel.addWidget(self.sitemaps_list)
 
-        self.process_btn = QPushButton("Procesar URLs seleccionadas")
+        self.process_btn = QPushButton("Process Selected URLs")
         self.process_btn.setEnabled(False)
         self.process_btn.clicked.connect(self.reload_selected)
         self.process_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         left_panel.addWidget(self.process_btn)
 
-        self.pending_btn = QPushButton("Procesar pendientes y errores")
+        self.pending_btn = QPushButton("Process Pending and Failed URLs")
         self.pending_btn.setEnabled(False)
         self.pending_btn.clicked.connect(self.reload_pending_or_errors)
         left_panel.addWidget(self.pending_btn)
 
-        self.stop_btn = QPushButton("Detener ejecución")
+        self.stop_btn = QPushButton("Stop Execution")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop_all_threads)
         left_panel.addWidget(self.stop_btn)
@@ -808,16 +889,16 @@ class SitemapCrawler(QMainWindow):
         self.progress_bar.setVisible(False)
         left_panel.addWidget(self.progress_bar)
 
-        self.progress_label = QLabel("Sin proceso activo")
+        self.progress_label = QLabel("No active process")
         self.progress_label.setFont(QFont("Arial", 8))
         self.progress_label.setStyleSheet("color: #666;")
         left_panel.addWidget(self.progress_label)
 
-        config_group = QGroupBox("Configuración de ejecución")
+        config_group = QGroupBox("Execution Settings")
         config_layout = QVBoxLayout()
 
         timeout_layout = QHBoxLayout()
-        timeout_layout.addWidget(QLabel("Timeout (seg):"))
+        timeout_layout.addWidget(QLabel("Timeout (sec):"))
         self.timeout_spin = QSpinBox()
         self.timeout_spin.setValue(10)
         self.timeout_spin.setRange(1, 120)
@@ -825,7 +906,7 @@ class SitemapCrawler(QMainWindow):
         config_layout.addLayout(timeout_layout)
 
         delay_layout = QHBoxLayout()
-        delay_layout.addWidget(QLabel("Delay por URL (seg):"))
+        delay_layout.addWidget(QLabel("Delay per URL (sec):"))
         self.delay_spin = QDoubleSpinBox()
         self.delay_spin.setValue(0.2)
         self.delay_spin.setRange(0, 10)
@@ -834,7 +915,7 @@ class SitemapCrawler(QMainWindow):
         config_layout.addLayout(delay_layout)
 
         workers_layout = QHBoxLayout()
-        workers_layout.addWidget(QLabel("Consultas simultáneas:"))
+        workers_layout.addWidget(QLabel("Concurrent Requests:"))
         self.workers_spin = QSpinBox()
         self.workers_spin.setValue(8)
         self.workers_spin.setRange(1, 50)
@@ -842,18 +923,18 @@ class SitemapCrawler(QMainWindow):
         config_layout.addLayout(workers_layout)
 
         agent_layout = QVBoxLayout()
-        agent_layout.addWidget(QLabel("Agente HTTP / User-Agent:"))
+        agent_layout.addWidget(QLabel("HTTP Agent / User-Agent:"))
 
         self.user_agent_combo = QComboBox()
         self.user_agent_combo.setMinimumWidth(260)
         agent_layout.addWidget(self.user_agent_combo)
 
         agent_buttons_layout = QHBoxLayout()
-        self.add_user_agent_btn = QPushButton("Agregar agente")
+        self.add_user_agent_btn = QPushButton("Add Agent")
         self.add_user_agent_btn.clicked.connect(self.add_user_agent)
         agent_buttons_layout.addWidget(self.add_user_agent_btn)
 
-        self.remove_user_agent_btn = QPushButton("Eliminar agente")
+        self.remove_user_agent_btn = QPushButton("Remove Agent")
         self.remove_user_agent_btn.clicked.connect(self.remove_user_agent)
         agent_buttons_layout.addWidget(self.remove_user_agent_btn)
 
@@ -862,14 +943,14 @@ class SitemapCrawler(QMainWindow):
         self.load_user_agents_config()
         self.refresh_user_agent_combo()
 
-        self.autosave_check = QCheckBox("Auto-guardar avance")
+        self.autosave_check = QCheckBox("Auto-save Progress")
         self.autosave_check.setChecked(True)
         config_layout.addWidget(self.autosave_check)
 
         config_group.setLayout(config_layout)
         left_panel.addWidget(config_group)
 
-        columns_group = QGroupBox("Campos a extraer")
+        columns_group = QGroupBox("Fields to Extract")
         columns_layout = QVBoxLayout()
         self.column_checks = {}
         columns = ["H1", "Title", "Meta Description", "Canonical", "Robots", "JSON Schema"]
@@ -884,22 +965,22 @@ class SitemapCrawler(QMainWindow):
         columns_group.setLayout(columns_layout)
         left_panel.addWidget(columns_group)
 
-        progress_group = QGroupBox("Gestión de avance")
+        progress_group = QGroupBox("Progress Management")
         progress_layout = QVBoxLayout()
 
-        save_btn = QPushButton("Guardar avance")
+        save_btn = QPushButton("Save Progress")
         save_btn.clicked.connect(self.save_progress)
         progress_layout.addWidget(save_btn)
 
-        save_as_btn = QPushButton("Guardar avance como...")
+        save_as_btn = QPushButton("Save Progress As...")
         save_as_btn.clicked.connect(self.save_progress_as)
         progress_layout.addWidget(save_as_btn)
 
-        load_progress_btn = QPushButton("Cargar avance")
+        load_progress_btn = QPushButton("Load Progress")
         load_progress_btn.clicked.connect(self.load_progress)
         progress_layout.addWidget(load_progress_btn)
 
-        self.progress_file_label = QLabel("Archivo: no definido")
+        self.progress_file_label = QLabel("File: not set")
         self.progress_file_label.setFont(QFont("Arial", 8))
         self.progress_file_label.setStyleSheet("color: #666;")
         self.progress_file_label.setWordWrap(True)
@@ -910,40 +991,42 @@ class SitemapCrawler(QMainWindow):
 
         left_panel.addStretch()
 
-        reload_all_btn = QPushButton("Procesar todas las URLs")
+        reload_all_btn = QPushButton("Process All URLs")
         reload_all_btn.clicked.connect(self.reload_all)
         left_panel.addWidget(reload_all_btn)
 
-        export_btn = QPushButton("Exportar a Excel")
+        export_btn = QPushButton("Export to Excel")
         export_btn.clicked.connect(self.export_to_excel)
         left_panel.addWidget(export_btn)
 
         right_panel = QVBoxLayout()
 
-        table_label = QLabel("URLs detectadas:")
+        # Right panel: searchable URL audit table.
+        table_label = QLabel("Detected URLs:")
         table_label.setFont(QFont("Arial", 10, QFont.Bold))
         right_panel.addWidget(table_label)
 
         search_layout = QHBoxLayout()
-        search_layout.addWidget(QLabel("Filtrar:"))
+        search_layout.addWidget(QLabel("Filter:"))
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Buscar en URLs, sitemap, estado o datos extraídos...")
+        self.search_input.setPlaceholderText("Search URLs, sitemap origin, status, or extracted data...")
         self.search_input.textChanged.connect(self.filter_table)
         search_layout.addWidget(self.search_input)
         right_panel.addLayout(search_layout)
 
-        self.counter_label = QLabel("URLs: 0 | Visibles: 0 | Seleccionadas: 0 | Procesadas: 0")
+        self.counter_label = QLabel("URLs: 0 | Visible: 0 | Selected: 0 | Processed: 0")
         self.counter_label.setFont(QFont("Arial", 9))
         right_panel.addWidget(self.counter_label)
 
-        selection_info = QLabel("Ctrl+A: seleccionar visibles | Shift+Click: rango | Ctrl+Click: toggle | Esc: deseleccionar")
+        selection_info = QLabel("Ctrl+A: select visible rows | Shift+Click: range | Ctrl+Click: toggle | Esc: clear selection")
         selection_info.setFont(QFont("Arial", 8))
         selection_info.setStyleSheet("color: #666; font-style: italic;")
         right_panel.addWidget(selection_info)
 
+        # The table starts with stable columns; extracted SEO fields are added dynamically.
         self.table = CustomTableWidget()
         self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["✓", "URL", "Origen (Sitemap)", "Código HTTP", "Última revisión"])
+        self.table.setHorizontalHeaderLabels(["✓", "URL", "Source Sitemap", "HTTP Status", "Last Checked"])
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.setSortingEnabled(True)
@@ -962,7 +1045,7 @@ class SitemapCrawler(QMainWindow):
         central_widget.setLayout(main_layout)
 
     def load_user_agents_config(self):
-        """Carga agentes personalizados desde un JSON local junto al ejecutable/script."""
+        """Load custom User-Agent profiles from a local JSON file next to the script."""
         self.custom_user_agents = []
         try:
             if os.path.exists(USER_AGENTS_FILE):
@@ -977,7 +1060,7 @@ class SitemapCrawler(QMainWindow):
             self.custom_user_agents = []
 
     def save_user_agents_config(self):
-        """Guarda solo agentes personalizados; los presets viven en el código."""
+        """Save only custom User-Agent profiles; built-in presets stay in code."""
         payload = {
             "schema_version": 1,
             "saved_at": datetime.now().isoformat(timespec="seconds"),
@@ -987,6 +1070,7 @@ class SitemapCrawler(QMainWindow):
             json.dump(payload, fh, ensure_ascii=False, indent=2)
 
     def refresh_user_agent_combo(self, selected_agent=None):
+        """Rebuild the User-Agent combo box from presets and custom profiles."""
         previous_agent = selected_agent or self.get_selected_user_agent()
         self.user_agent_combo.blockSignals(True)
         self.user_agent_combo.clear()
@@ -999,12 +1083,12 @@ class SitemapCrawler(QMainWindow):
                 continue
             seen.add(value)
             option = {
-                "name": item.get("name", "Agente sin nombre"),
+                "name": item.get("name", "Unnamed agent"),
                 "value": value,
                 "preset": bool(item.get("preset", False)),
             }
             self.user_agent_options.append(option)
-            prefix = "Preset" if option["preset"] else "Personalizado"
+            prefix = "Preset" if option["preset"] else "Custom"
             self.user_agent_combo.addItem(f'{option["name"]} ({prefix})', option)
 
         selected_index = 0
@@ -1016,6 +1100,7 @@ class SitemapCrawler(QMainWindow):
         self.user_agent_combo.blockSignals(False)
 
     def get_selected_user_agent(self):
+        """Return the currently selected User-Agent value."""
         if not hasattr(self, "user_agent_combo"):
             return DEFAULT_USER_AGENT
         data = self.user_agent_combo.currentData()
@@ -1024,25 +1109,26 @@ class SitemapCrawler(QMainWindow):
         return DEFAULT_USER_AGENT
 
     def add_user_agent(self):
-        name, ok = QInputDialog.getText(self, "Agregar agente HTTP", "Nombre del agente:")
+        """Ask the user for a custom User-Agent and persist it locally."""
+        name, ok = QInputDialog.getText(self, "Add HTTP Agent", "Agent name:")
         if not ok:
             return
         name = str(name).strip()
         if not name:
-            QMessageBox.warning(self, "Agente HTTP", "Debes indicar un nombre para el agente.")
+            QMessageBox.warning(self, "HTTP Agent", "You must enter an agent name.")
             return
 
-        value, ok = QInputDialog.getMultiLineText(self, "Agregar agente HTTP", "User-Agent completo:", "")
+        value, ok = QInputDialog.getMultiLineText(self, "Add HTTP Agent", "Full User-Agent:", "")
         if not ok:
             return
         value = clean_user_agent(value)
         if not value:
-            QMessageBox.warning(self, "Agente HTTP", "Debes indicar el User-Agent completo.")
+            QMessageBox.warning(self, "HTTP Agent", "You must enter the full User-Agent value.")
             return
 
         for option in PRESET_USER_AGENTS + self.custom_user_agents:
             if clean_user_agent(option.get("value")) == value:
-                QMessageBox.information(self, "Agente HTTP", "Ese User-Agent ya existe en la lista.")
+                QMessageBox.information(self, "HTTP Agent", "That User-Agent already exists in the list.")
                 self.refresh_user_agent_combo(value)
                 return
 
@@ -1050,24 +1136,25 @@ class SitemapCrawler(QMainWindow):
         try:
             self.save_user_agents_config()
         except Exception as exc:
-            QMessageBox.warning(self, "Agente HTTP", f"El agente fue agregado, pero no se pudo guardar el archivo local:\n{str(exc)}")
+            QMessageBox.warning(self, "HTTP Agent", f"The agent was added, but the local configuration file could not be saved:\n{str(exc)}")
 
         self.refresh_user_agent_combo(value)
         self.mark_dirty()
-        QMessageBox.information(self, "Agente HTTP", "Agente agregado correctamente.")
+        QMessageBox.information(self, "HTTP Agent", "Agent added successfully.")
 
     def remove_user_agent(self):
+        """Remove the selected custom User-Agent profile."""
         data = self.user_agent_combo.currentData()
         if not isinstance(data, dict):
             return
         if data.get("preset"):
-            QMessageBox.information(self, "Agente HTTP", "Los agentes predefinidos no se pueden eliminar.")
+            QMessageBox.information(self, "HTTP Agent", "Preset agents cannot be removed.")
             return
 
         reply = QMessageBox.question(
             self,
-            "Eliminar agente HTTP",
-            f'¿Eliminar el agente personalizado "{data.get("name", "")}"?',
+            "Remove HTTP Agent",
+            f'Remove custom agent "{data.get("name", "")}"?',
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -1082,38 +1169,42 @@ class SitemapCrawler(QMainWindow):
         try:
             self.save_user_agents_config()
         except Exception as exc:
-            QMessageBox.warning(self, "Agente HTTP", f"No se pudo actualizar el archivo local:\n{str(exc)}")
+            QMessageBox.warning(self, "HTTP Agent", f"The local configuration file could not be updated:\n{str(exc)}")
 
         self.refresh_user_agent_combo(DEFAULT_USER_AGENT)
         self.mark_dirty()
 
     def mark_dirty(self):
+        """Mark the current project state as changed since the last save."""
         self.progress_dirty = True
 
     def set_buttons_processing(self, processing):
+        """Enable or disable controls depending on whether a task is running."""
         self.load_btn.setEnabled(not processing)
         self.process_btn.setEnabled((not processing) and bool(self.urls))
         self.pending_btn.setEnabled((not processing) and bool(self.urls))
         self.stop_btn.setEnabled(processing)
 
     def add_log(self, message):
+        """Append a status message to the sitemap log list."""
         item = QListWidgetItem(message)
         self.sitemaps_list.addItem(item)
         self.sitemaps_list.scrollToBottom()
 
     def auto_detect_sitemaps(self):
+        """Start sitemap discovery for the domain or sitemap entered by the user."""
         self.stop_all_threads()
         url = self.url_input.text().strip()
 
         if not url:
-            QMessageBox.warning(self, "Error", "Por favor ingresa una URL válida")
+            QMessageBox.warning(self, "Error", "Please enter a valid URL")
             return
 
         if self.progress_dirty and self.urls:
             reply = QMessageBox.question(
                 self,
-                "Reemplazar datos",
-                "Esto reemplazará las URLs actuales. ¿Quieres continuar?",
+                "Replace Current Data",
+                "This will replace the current URL list. Do you want to continue?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -1129,7 +1220,7 @@ class SitemapCrawler(QMainWindow):
         self.url_to_row = {}
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(0)
-        self.progress_label.setText("Detectando sitemaps...")
+        self.progress_label.setText("Detecting sitemaps...")
         self.set_buttons_processing(True)
 
         self.detector_thread = DetectorThread(url, self.timeout_spin.value(), self.get_selected_user_agent())
@@ -1139,6 +1230,7 @@ class SitemapCrawler(QMainWindow):
         self.detector_thread.start()
 
     def detection_finished(self, detected_sitemaps, urls_dict, sitemap_urls_map):
+        """Receive sitemap discovery results and populate the URL table."""
         try:
             self.detected_sitemaps = detected_sitemaps
             self.urls = urls_dict
@@ -1154,28 +1246,30 @@ class SitemapCrawler(QMainWindow):
 
             self.populate_table()
             self.progress_bar.setVisible(False)
-            self.progress_label.setText(f"Detección completada: {len(urls_dict)} URLs únicas")
+            self.progress_label.setText(f"Detection completed: {len(urls_dict)} unique URLs")
             self.set_buttons_processing(False)
             self.mark_dirty()
             self.auto_save_if_needed(force=True)
 
             QMessageBox.information(
                 self,
-                "Éxito",
-                f"Se encontraron {len(detected_sitemaps)} sitemap(s)\ncon {len(urls_dict)} URL(s) únicas",
+                "Success",
+                f"Found {len(detected_sitemaps)} sitemap(s)\nwith {len(urls_dict)} unique URL(s)",
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Error", f"Error finalizando detección: {str(exc)}")
+            QMessageBox.critical(self, "Error", f"Error completing sitemap detection: {str(exc)}")
             self.set_buttons_processing(False)
             self.progress_bar.setVisible(False)
 
     def detection_error(self, error_msg):
+        """Display an error reported by the sitemap detection thread."""
         self.progress_bar.setVisible(False)
-        self.progress_label.setText("Error en detección")
+        self.progress_label.setText("Detection error")
         self.set_buttons_processing(False)
         QMessageBox.critical(self, "Error", error_msg)
 
     def populate_table(self):
+        """Populate the table from the current URL and table-data dictionaries."""
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self.urls))
         self.url_to_row.clear()
@@ -1186,7 +1280,7 @@ class SitemapCrawler(QMainWindow):
                 self.table_data[url] = {
                     "url": url,
                     "sitemap": sitemap_name,
-                    "status": "Pendiente",
+                    "status": "Pending",
                     "last_checked": "",
                     "data": {},
                     "selected": False,
@@ -1197,6 +1291,7 @@ class SitemapCrawler(QMainWindow):
             self.url_to_row[url] = idx
             self.create_or_update_row(idx, url)
 
+            # Process UI events every few rows when loading large sitemaps.
             if idx % 200 == 0:
                 QApplication.processEvents()
 
@@ -1205,6 +1300,7 @@ class SitemapCrawler(QMainWindow):
         self.update_button_text()
 
     def create_or_update_row(self, row, url):
+        """Create or refresh one table row for a URL."""
         row_data = self.table_data.get(url, {})
 
         checkbox = QCheckBox()
@@ -1214,8 +1310,8 @@ class SitemapCrawler(QMainWindow):
 
         self.set_table_item(row, 1, url)
         self.set_table_item(row, 2, row_data.get("sitemap", "N/A"))
-        self.set_table_item(row, 3, row_data.get("status", "Pendiente"))
-        self.color_status_cell(row_data.get("status", "Pendiente"), row, 3)
+        self.set_table_item(row, 3, row_data.get("status", "Pending"))
+        self.color_status_cell(row_data.get("status", "Pending"), row, 3)
         self.set_table_item(row, 4, row_data.get("last_checked", ""))
 
         for key, value in row_data.get("data", {}).items():
@@ -1223,11 +1319,13 @@ class SitemapCrawler(QMainWindow):
             self.set_table_item(row, col_idx, value)
 
     def set_table_item(self, row, col, value):
+        """Insert a non-editable text item into the table."""
         item = QTableWidgetItem(str(value) if value is not None else "")
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
         self.table.setItem(row, col, item)
 
     def color_status_cell(self, status, row, col):
+        """Apply a background color that reflects the HTTP status."""
         item = self.table.item(row, col)
         if not item:
             return
@@ -1239,12 +1337,13 @@ class SitemapCrawler(QMainWindow):
             item.setBackground(QColor(255, 99, 71))
         elif status in ("TIMEOUT", "CONNECTION ERROR"):
             item.setBackground(QColor(255, 215, 0))
-        elif status == "Pendiente":
+        elif status == "Pending":
             item.setBackground(QColor(255, 255, 255))
         else:
             item.setBackground(QColor(211, 211, 211))
 
     def ensure_column(self, col_name):
+        """Create a dynamic table column if it does not already exist."""
         for col in range(self.table.columnCount()):
             header = self.table.horizontalHeaderItem(col)
             if header and header.text() == col_name:
@@ -1256,6 +1355,7 @@ class SitemapCrawler(QMainWindow):
         return col_idx
 
     def rebuild_url_to_row(self):
+        """Rebuild the fast lookup map from URL to visible table row."""
         self.url_to_row.clear()
         for row in range(self.table.rowCount()):
             url_item = self.table.item(row, 1)
@@ -1263,16 +1363,19 @@ class SitemapCrawler(QMainWindow):
                 self.url_to_row[url_item.text()] = row
 
     def on_checkbox_state_changed(self):
+        """React to manual checkbox changes in the table."""
         if not self.table.blocking:
             self.mark_dirty()
             self.on_table_selection_changed()
 
     def on_table_selection_changed(self):
+        """Debounce table selection changes before updating counters."""
         if not self.updating_button:
             self.updating_button = True
             QTimer.singleShot(100, self.update_button_text)
 
     def update_button_text(self):
+        """Refresh counters and process-button text based on current selection."""
         self.rebuild_url_to_row()
         self.selected_count = 0
         visible_count = 0
@@ -1294,21 +1397,22 @@ class SitemapCrawler(QMainWindow):
                 if selected:
                     self.selected_count += 1
 
-            status = self.table_data.get(url, {}).get("status", "Pendiente")
-            if status and status != "Pendiente":
+            status = self.table_data.get(url, {}).get("status", "Pending")
+            if status and status != "Pending":
                 processed_count += 1
 
         if self.selected_count > 0:
-            self.process_btn.setText(f"Procesar selección ({self.selected_count} URLs)")
+            self.process_btn.setText(f"Process Selection ({self.selected_count} URLs)")
         else:
-            self.process_btn.setText("Procesar URLs seleccionadas")
+            self.process_btn.setText("Process Selected URLs")
 
         self.counter_label.setText(
-            f"URLs: {len(self.urls)} | Visibles: {visible_count} | Seleccionadas: {self.selected_count} | Procesadas: {processed_count}"
+            f"URLs: {len(self.urls)} | Visible: {visible_count} | Selected: {self.selected_count} | Processed: {processed_count}"
         )
         self.updating_button = False
 
     def on_sitemap_selected(self):
+        """Select table URLs that belong to the selected sitemap entries."""
         selected_items = self.sitemaps_list.selectedItems()
         self.table.blocking = True
 
@@ -1332,6 +1436,7 @@ class SitemapCrawler(QMainWindow):
         self.update_button_text()
 
     def filter_table(self):
+        """Show only rows matching the search field."""
         search_text = self.search_input.text().lower().strip()
 
         for row in range(self.table.rowCount()):
@@ -1348,6 +1453,7 @@ class SitemapCrawler(QMainWindow):
         self.update_button_text()
 
     def get_selected_urls(self):
+        """Return visible URLs that are currently selected."""
         selected = []
         for row in range(self.table.rowCount()):
             if self.table.isRowHidden(row):
@@ -1360,34 +1466,39 @@ class SitemapCrawler(QMainWindow):
         return selected
 
     def get_pending_or_error_urls(self):
+        """Return URLs that are pending or previously failed."""
         urls = []
         for url, row_data in self.table_data.items():
-            status = str(row_data.get("status", "Pendiente"))
-            if status in ("", "Pendiente", "TIMEOUT", "CONNECTION ERROR", "ERROR") or status.startswith("4") or status.startswith("5"):
+            status = str(row_data.get("status", "Pending"))
+            if status in ("", "Pending", "TIMEOUT", "CONNECTION ERROR", "ERROR") or status.startswith("4") or status.startswith("5"):
                 urls.append(url)
         return urls
 
     def reload_selected(self):
+        """Start crawling for selected visible URLs."""
         selected = self.get_selected_urls()
         if not selected:
-            QMessageBox.warning(self, "Aviso", "Selecciona al menos una URL visible")
+            QMessageBox.warning(self, "Notice", "Select at least one visible URL")
             return
         self.start_crawling(selected)
 
     def reload_pending_or_errors(self):
+        """Start crawling for URLs that still need attention."""
         selected = self.get_pending_or_error_urls()
         if not selected:
-            QMessageBox.information(self, "Aviso", "No hay URLs pendientes o con error")
+            QMessageBox.information(self, "Notice", "There are no pending or failed URLs")
             return
         self.start_crawling(selected)
 
     def reload_all(self):
+        """Start crawling for every loaded URL."""
         if not self.urls:
-            QMessageBox.warning(self, "Aviso", "Carga un sitemap primero")
+            QMessageBox.warning(self, "Notice", "Load a sitemap first")
             return
         self.start_crawling(list(self.urls.keys()))
 
     def start_crawling(self, urls_to_crawl):
+        """Configure and launch the concurrent crawler thread."""
         if self.crawler_thread and self.crawler_thread.isRunning():
             self.crawler_thread.stop()
             self.crawler_thread.wait(3000)
@@ -1396,7 +1507,7 @@ class SitemapCrawler(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(urls_to_crawl))
         self.progress_bar.setValue(0)
-        self.progress_label.setText(f"Procesando 0 de {len(urls_to_crawl)} con {self.workers_spin.value()} consultas simultáneas")
+        self.progress_label.setText(f"Processing 0 of {len(urls_to_crawl)} with {self.workers_spin.value()} concurrent requests")
         self.set_buttons_processing(True)
         self.processed_since_autosave = 0
 
@@ -1414,6 +1525,7 @@ class SitemapCrawler(QMainWindow):
         self.crawler_thread.start()
 
     def update_progress(self, current, total, url, status, data):
+        """Receive one crawled URL result and update the table."""
         row = self.url_to_row.get(url)
         if row is None:
             self.rebuild_url_to_row()
@@ -1449,7 +1561,7 @@ class SitemapCrawler(QMainWindow):
         self.rebuild_url_to_row()
 
         self.progress_bar.setValue(current)
-        self.progress_label.setText(f"Procesando {current} de {total}: {status} | {url[:90]}")
+        self.progress_label.setText(f"Processing {current} of {total}: {status} | {url[:90]}")
         self.processed_since_autosave += 1
         self.mark_dirty()
 
@@ -1460,19 +1572,22 @@ class SitemapCrawler(QMainWindow):
         self.update_button_text()
 
     def crawling_finished(self):
+        """Finalize the UI state after crawling completes."""
         self.set_buttons_processing(False)
         self.progress_bar.setVisible(False)
-        self.progress_label.setText("Procesamiento completado")
+        self.progress_label.setText("Processing completed")
         self.auto_save_if_needed(force=True, silent=True)
-        QMessageBox.information(self, "Éxito", "Procesamiento completado ✓")
+        QMessageBox.information(self, "Success", "Processing completed ✓")
 
     def crawling_error(self, error_msg):
+        """Display an error reported by the crawler thread."""
         self.set_buttons_processing(False)
         self.progress_bar.setVisible(False)
-        self.progress_label.setText("Error en procesamiento")
+        self.progress_label.setText("Processing error")
         QMessageBox.critical(self, "Error", error_msg)
 
     def build_progress_payload(self):
+        """Build the JSON-serializable progress payload."""
         selected_columns = [col for col, check in self.column_checks.items() if check.isChecked()]
         payload = {
             "schema_version": PROGRESS_SCHEMA_VERSION,
@@ -1494,11 +1609,12 @@ class SitemapCrawler(QMainWindow):
         return payload
 
     def save_progress_as(self):
+        """Ask for a target file and save the current progress there."""
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Guardar avance",
+            "Save Progress",
             self.default_progress_filename(),
-            "Archivos JSON (*.json)",
+            "JSON Files (*.json)",
         )
         if not file_path:
             return False
@@ -1506,6 +1622,7 @@ class SitemapCrawler(QMainWindow):
         return self.save_progress()
 
     def save_progress(self):
+        """Save the current progress to the selected JSON file."""
         if not self.progress_file_path:
             return self.save_progress_as()
 
@@ -1516,13 +1633,14 @@ class SitemapCrawler(QMainWindow):
 
             self.progress_dirty = False
             self.update_progress_file_label()
-            self.progress_label.setText(f"Avance guardado: {os.path.basename(self.progress_file_path)}")
+            self.progress_label.setText(f"Progress saved: {os.path.basename(self.progress_file_path)}")
             return True
         except Exception as exc:
-            QMessageBox.critical(self, "Error", f"No se pudo guardar el avance:\n{str(exc)}")
+            QMessageBox.critical(self, "Error", f"Progress could not be saved:\n{str(exc)}")
             return False
 
     def auto_save_if_needed(self, force=False, silent=True):
+        """Auto-save when enabled and the state has changed."""
         if not self.autosave_check.isChecked():
             return
         if not self.progress_dirty and not force:
@@ -1541,24 +1659,25 @@ class SitemapCrawler(QMainWindow):
             self.progress_dirty = False
             self.update_progress_file_label()
             if not silent:
-                self.progress_label.setText(f"Avance auto-guardado: {os.path.basename(self.progress_file_path)}")
+                self.progress_label.setText(f"Progress auto-saved: {os.path.basename(self.progress_file_path)}")
         except Exception as exc:
             if not silent:
-                QMessageBox.warning(self, "Auto-guardado", f"No se pudo auto-guardar:\n{str(exc)}")
+                QMessageBox.warning(self, "Auto-save", f"Auto-save failed:\n{str(exc)}")
 
     def load_progress(self):
+        """Load a saved progress JSON file and rebuild the UI state."""
         if self.progress_dirty:
             reply = QMessageBox.question(
                 self,
-                "Cargar avance",
-                "Hay cambios sin guardar. ¿Quieres continuar y reemplazar el estado actual?",
+                "Load Progress",
+                "There are unsaved changes. Do you want to continue and replace the current state?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
             if reply != QMessageBox.Yes:
                 return
 
-        file_path, _ = QFileDialog.getOpenFileName(self, "Cargar avance", "", "Archivos JSON (*.json)")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Load Progress", "", "JSON Files (*.json)")
         if not file_path:
             return
 
@@ -1569,8 +1688,8 @@ class SitemapCrawler(QMainWindow):
             if int(payload.get("schema_version", 0)) != PROGRESS_SCHEMA_VERSION:
                 QMessageBox.warning(
                     self,
-                    "Versión de avance",
-                    "El archivo de avance tiene una versión distinta. Intentaré cargarlo de todos modos.",
+                    "Progress File Version",
+                    "The progress file has a different version. I will try to load it anyway.",
                 )
 
             self.progress_file_path = file_path
@@ -1615,31 +1734,34 @@ class SitemapCrawler(QMainWindow):
             self.populate_table()
             self.progress_dirty = False
             self.update_progress_file_label()
-            self.progress_label.setText(f"Avance cargado: {os.path.basename(file_path)}")
+            self.progress_label.setText(f"Progress loaded: {os.path.basename(file_path)}")
             self.set_buttons_processing(False)
-            QMessageBox.information(self, "Éxito", "Avance cargado correctamente")
+            QMessageBox.information(self, "Success", "Progress loaded successfully")
         except Exception as exc:
-            QMessageBox.critical(self, "Error", f"No se pudo cargar el avance:\n{str(exc)}")
+            QMessageBox.critical(self, "Error", f"Progress could not be loaded:\n{str(exc)}")
 
     def default_progress_filename(self):
+        """Generate a safe default progress filename for the current domain."""
         parsed = urlparse(self.url_input.text().strip())
         domain = parsed.netloc or parsed.path or "sitemap"
         domain = domain.replace("/", "_").replace(":", "_").replace(".", "_")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"sitemap_crawler_avance_{domain}_{stamp}.json"
+        return f"sitemap_audit_progress_{domain}_{stamp}.json"
 
     def update_progress_file_label(self):
+        """Update the label that shows the active progress file path."""
         if self.progress_file_path:
-            self.progress_file_label.setText(f"Archivo: {self.progress_file_path}")
+            self.progress_file_label.setText(f"File: {self.progress_file_path}")
         else:
-            self.progress_file_label.setText("Archivo: no definido")
+            self.progress_file_label.setText("File: not set")
 
     def export_to_excel(self):
+        """Export the current table contents to an Excel workbook."""
         if self.table.rowCount() == 0:
-            QMessageBox.warning(self, "Aviso", "No hay datos para exportar")
+            QMessageBox.warning(self, "Notice", "There is no data to export")
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "Guardar Excel", "sitemap_crawler_export.xlsx", "Archivos Excel (*.xlsx)")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Excel File", "sitemap_audit_export.xlsx", "Excel Files (*.xlsx)")
         if not file_path:
             return
 
@@ -1662,11 +1784,13 @@ class SitemapCrawler(QMainWindow):
 
             df = pd.DataFrame(rows, columns=headers)
             df.to_excel(file_path, index=False)
-            QMessageBox.information(self, "Éxito", f"Archivo guardado: {file_path}")
+            QMessageBox.information(self, "Success", f"File saved: {file_path}")
         except Exception as exc:
-            QMessageBox.critical(self, "Error", f"Error al exportar: {str(exc)}")
+            QMessageBox.critical(self, "Error", f"Export error: {str(exc)}")
 
 
+
+# Application entry point.
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     crawler = SitemapCrawler()
