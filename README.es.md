@@ -1,3 +1,5 @@
+## `README.es.md`
+
 ```md
 # Sitemap Audit Crawler
 
@@ -97,6 +99,4 @@ Esto es especialmente útil para auditorías grandes que pueden tomar tiempo o q
 ### Exportación a Excel
 
 Los resultados pueden exportarse a formato `.xlsx` para análisis, filtros, reportes o documentación.
-
----
 
