@@ -1,8 +1,3 @@
-
----
-
-## `README.es.md`
-
 ```md
 # Sitemap Audit Crawler
 
@@ -105,11 +100,3 @@ Los resultados pueden exportarse a formato `.xlsx` para análisis, filtros, repo
 
 ---
 
-## Capturas de pantalla
-
-Las capturas pueden agregarse dentro de la carpeta `screenshots/`.
-
-Ejemplo:
-
-```md
-![Interfaz principal](screenshots/main-interface.png)

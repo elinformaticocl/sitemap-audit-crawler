@@ -99,11 +99,3 @@ Audit results can be exported to `.xlsx` format for further analysis, filtering,
 
 ---
 
-## Screenshots
-
-Screenshots can be added in the `screenshots/` directory.
-
-Example:
-
-```md
-![Main interface](screenshots/main-interface.png)
